@@ -1,0 +1,6 @@
+# raw captures stay local; commit a small sample under captures/sample/ instead
+captures/*.jsonl
+certs/
+node_modules/
+/fpserver
+/goclient
