@@ -42,8 +42,8 @@ type ClientHello struct {
 //     header, not the handshake message.
 //   - Out: *ClientHello with every list in wire order.
 //
-// Layout (spec: RFC 8446 §5.1 record layer, §4 handshake header, §4.1.2
-// ClientHello, §4.2 extensions; RFC 6066 §3 SNI; RFC 7301 §3.1 ALPN)
+// Layout (spec: RFC 9846 §5.1 record layer, §4 handshake header, §4.2.2
+// ClientHello, §4.3 extensions; RFC 6066 §3 SNI; RFC 7301 §3.1 ALPN)
 //
 //	record:    type(1)=0x16  legacy_record_version(2)  length(2)  fragment
 //	handshake: msg_type(1)=0x01  length(3)  body
