@@ -28,6 +28,9 @@ func TestParseClientHelloOpenSSLMin(t *testing.T) {
 	if ch.LegacyVersion != 0x0303 {
 		t.Errorf("LegacyVersion = %#04x, want 0x0303", ch.LegacyVersion)
 	}
+	if ch.LegacyRecordVersion != 0x0301 {
+		t.Errorf("LegacyRecordVersion = %#04x, want 0x0301", ch.LegacyRecordVersion)
+	}
 	if ch.SessionIDLen != 32 {
 		t.Errorf("SessionIDLen = %d, want 32", ch.SessionIDLen)
 	}
@@ -184,6 +187,7 @@ func TestParseClientHelloErrors(t *testing.T) {
 		{"server hello message type", func(t *testing.T) []byte { return mutate(t, map[int][]byte{0x05: {0x02}}) }, ErrNotClientHello},
 		{"handshake longer than record", func(t *testing.T) []byte { return mutate(t, map[int][]byte{0x06: {0x00, 0x00, 0xb7}}) }, ErrFragmentedClientHello},
 		{"handshake length 32", func(t *testing.T) []byte { return mutate(t, map[int][]byte{0x06: {0x00, 0x00, 0x20}}) }, ErrHandshakeTooShort},
+		{"record length 2", func(t *testing.T) []byte { return mutate(t, map[int][]byte{0x03: u16(2)}) }, ErrRecordTooShort},
 		{"session id length 33", func(t *testing.T) []byte { return mutate(t, map[int][]byte{0x2b: {33}}) }, ErrSessionIDTooLong},
 		{"session id length 255", func(t *testing.T) []byte { return mutate(t, map[int][]byte{0x2b: {0xff}}) }, ErrSessionIDTooLong},
 		{"body ends after session id", func(t *testing.T) []byte { return wrap(t, prefix(32)) }, ErrCipherSuitesLengthMissing},
@@ -322,8 +326,64 @@ func TestParseClientHelloNoExtensions(t *testing.T) {
 	if ch.Extensions == nil || len(ch.Extensions) != 0 {
 		t.Errorf("Extensions = %#v, want empty non-nil", ch.Extensions)
 	}
+	if ch.LegacyRecordVersion != 0x0301 {
+		t.Errorf("LegacyRecordVersion = %#04x, want 0x0301", ch.LegacyRecordVersion)
+	}
 	if ch.Malformed != nil {
 		t.Errorf("Malformed = %v, want nil", ch.Malformed)
+	}
+}
+
+func TestParseClientHelloExtensionList(t *testing.T) {
+	ver := ext{0x002b, []byte{0x02, 0x03, 0x04}}
+	badVer := ext{0x002b, []byte{0x01, 0x03}}
+	keyShare := ext{0x0033, []byte{0x00, 0x00}}
+	ids := []byte{0x00, 0x0b, 0x00, 0x05, 'a', 'b', 'c', 'd', 'e', 0x00, 0x00, 0x00, 0x00}
+	binders := append([]byte{0x00, 0x21, 0x20}, make([]byte, 32)...)
+	psk := ext{0x0029, append(slices.Clone(ids), binders...)}
+
+	tests := []struct {
+		name string
+		exts []ext
+		want []error
+	}{
+		{"duplicate supported_versions", []ext{ver, ver}, []error{ErrExtensionDuplicate}},
+		{"duplicate, first malformed", []ext{badVer, ver}, []error{ErrExtensionDuplicate, ErrSupportedVersionsOddLength}},
+		{"duplicate unknown type", []ext{keyShare, keyShare}, []error{ErrExtensionDuplicate}},
+		{"same GREASE value twice", []ext{{0x1a1a, nil}, {0x1a1a, nil}}, []error{ErrExtensionDuplicate}},
+		{"two different GREASE values", []ext{{0x1a1a, nil}, {0x2a2a, nil}}, nil},
+		{"pre_shared_key last", []ext{ver, psk}, nil},
+		{"pre_shared_key not last", []ext{psk, ver}, []error{ErrPreSharedKeyIsNotLastExtension}},
+		{"pre_shared_key twice", []ext{psk, psk}, []error{ErrPreSharedKeyIsNotLastExtension, ErrExtensionDuplicate}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ch, err := ParseClientHello(withExt(t, tt.exts...))
+			if err != nil {
+				t.Fatalf("ParseClientHello: %v", err)
+			}
+			if len(ch.Extensions) != len(tt.exts) {
+				t.Errorf("got %d extensions, want %d", len(ch.Extensions), len(tt.exts))
+			}
+			if len(ch.Malformed) != len(tt.want) {
+				t.Fatalf("Malformed = %v, want %v", ch.Malformed, tt.want)
+			}
+			for i, want := range tt.want {
+				if !errors.Is(ch.Malformed[i], want) {
+					t.Errorf("Malformed[%d] = %v, want %v", i, ch.Malformed[i], want)
+				}
+			}
+		})
+	}
+}
+
+func TestParseClientHelloDuplicateNamesType(t *testing.T) {
+	ch, err := ParseClientHello(withExt(t, ext{0x0033, nil}, ext{0x0033, nil}))
+	if err != nil {
+		t.Fatalf("ParseClientHello: %v", err)
+	}
+	if want := "extension type appears more than once: 0x0033"; len(ch.Malformed) != 1 || ch.Malformed[0].Error() != want {
+		t.Errorf("Malformed = %v, want [%s]", ch.Malformed, want)
 	}
 }
 

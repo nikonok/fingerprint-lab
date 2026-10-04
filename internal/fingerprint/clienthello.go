@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 )
 
 // Errors returned by ParseClientHello when the bytes are not a ClientHello it
@@ -21,6 +22,7 @@ var (
 	ErrNotHandshake          = errors.New("not a handshake record")
 	ErrNotClientHello        = errors.New("not a ClientHello handshake message")
 	ErrRecordTruncated       = errors.New("record length exceeds captured bytes")
+	ErrRecordTooShort        = errors.New("record too short for a handshake header")
 	ErrFragmentedClientHello = errors.New("ClientHello spans several records (not supported yet)")
 	ErrHandshakeTooShort     = errors.New("handshake length too short for a ClientHello")
 
@@ -42,10 +44,15 @@ var (
 	ErrTrailingData                    = errors.New("bytes left over after the extensions block")
 )
 
-// Errors for malformed extension contents. They are never returned as the
-// error of ParseClientHello: DecodeExtensions collects them, and
-// ParseClientHello records them in ClientHello.Malformed.
+// Errors for a malformed extension list or malformed extension contents. They
+// are never returned as the error of ParseClientHello; it records them in
+// ClientHello.Malformed.
 var (
+	// Extension list checks, made while ParseClientHello splits the block.
+	ErrExtensionDuplicate             = errors.New("extension type appears more than once")
+	ErrPreSharedKeyIsNotLastExtension = errors.New("pre_shared_key extension is not the last extension in the ClientHello")
+
+	// Extension contents, collected by DecodeExtensions.
 	ErrServerNameTooShort            = errors.New("server_name extension too short")
 	ErrServerNameListLenMismatch     = errors.New("server_name extension list length mismatch")
 	ErrServerNameNameTypeNotHostName = errors.New("server_name extension name type not host_name")
@@ -75,14 +82,25 @@ var (
 // Layout of the bytes in front of the ClientHello body and of its fixed
 // fields (RFC 9846 §5.1, §4, §4.2.2).
 const (
-	recordHeaderLen    = 5 // type(1) legacy_record_version(2) length(2)
-	handshakeHeaderLen = 4 // msg_type(1) length(3)
-	helloBodyOffset    = recordHeaderLen + handshakeHeaderLen
-	legacyVersionLen   = 2
-	randomLen          = 32
-	maxSessionIDLen    = 32
-	sessionIDLenOffset = helloBodyOffset + legacyVersionLen + randomLen
-	extHeaderLen       = 4 // type(2) length(2)
+	recordHeaderLen     = 5 // type(1) legacy_record_version(2) length(2)
+	recordVersionOffset = 1
+	handshakeHeaderLen  = 4 // msg_type(1) length(3)
+	helloBodyOffset     = recordHeaderLen + handshakeHeaderLen
+	legacyVersionLen    = 2
+	randomLen           = 32
+	maxSessionIDLen     = 32
+	sessionIDLenOffset  = helloBodyOffset + legacyVersionLen + randomLen
+	extHeaderLen        = 4 // type(2) length(2)
+)
+
+// Extension types the parser looks at (IANA TLS ExtensionType registry).
+const (
+	extServerName          = 0x0000 // RFC 6066 §3
+	extSupportedGroups     = 0x000a // RFC 9846
+	extSignatureAlgorithms = 0x000d // RFC 9846
+	extALPN                = 0x0010 // RFC 7301 §3.1
+	extPreSharedKey        = 0x0029 // RFC 9846; must be the last extension
+	extSupportedVersions   = 0x002b // RFC 9846
 )
 
 // server_name layout (RFC 6066 §3).
@@ -118,11 +136,12 @@ type Extension struct {
 // ParseClientHello. Slices keep wire order, including GREASE values;
 // filtering happens where a fingerprint is built, not here.
 type ClientHello struct {
-	LegacyVersion      uint16      `json:"legacy_version"`
-	SessionIDLen       int         `json:"session_id_len"`
-	CipherSuites       []uint16    `json:"cipher_suites"`
-	CompressionMethods []byte      `json:"compression_methods"`
-	Extensions         []Extension `json:"extensions"`
+	LegacyVersion       uint16      `json:"legacy_version"`
+	LegacyRecordVersion uint16      `json:"legacy_record_version"`
+	SessionIDLen        int         `json:"session_id_len"`
+	CipherSuites        []uint16    `json:"cipher_suites"`
+	CompressionMethods  []byte      `json:"compression_methods"`
+	Extensions          []Extension `json:"extensions"`
 
 	// Decoded from their extensions by DecodeExtensions. A field stays empty
 	// when its extension is absent or malformed.
@@ -132,9 +151,11 @@ type ClientHello struct {
 	ALPN                []string `json:"alpn,omitempty"`                 // 0x0010
 	SupportedVersions   []uint16 `json:"supported_versions,omitempty"`   // 0x002b
 
-	// Malformed holds one error per known extension whose contents broke
-	// their layout, in wire order. Well-behaved clients do not send these,
-	// so they are recorded as a signal rather than failing the parse.
+	// Malformed holds the extension problems that did not stop the parse:
+	// first duplicate types and a pre_shared_key that is not last, then one
+	// error per known extension whose contents broke their layout, each in
+	// wire order. Well-behaved clients do not send these, so they are
+	// recorded as a signal rather than failing the parse.
 	Malformed ErrorList `json:"malformed,omitempty"`
 }
 
@@ -198,9 +219,13 @@ func ParseClientHello(raw []byte) (*ClientHello, error) {
 	if recordType != ClientHelloRecordType {
 		return nil, ErrNotHandshake
 	}
+	legacyRecordVersion := binary.BigEndian.Uint16(raw[recordVersionOffset : recordVersionOffset+2])
 	recordLength := int(binary.BigEndian.Uint16(raw[recordHeaderLen-2 : recordHeaderLen]))
 	if len(raw) < recordHeaderLen+recordLength {
 		return nil, ErrRecordTruncated
+	}
+	if recordLength < handshakeHeaderLen {
+		return nil, ErrRecordTooShort
 	}
 	messageType := raw[recordHeaderLen]
 	if messageType != ClientHelloMessageType {
@@ -267,15 +292,17 @@ func ParseClientHello(raw []byte) (*ClientHello, error) {
 
 	nextOffset += 1 + int(compressionMethodsLength[0])
 
+	ch := &ClientHello{
+		LegacyVersion:       binary.BigEndian.Uint16(legacyVersion),
+		LegacyRecordVersion: legacyRecordVersion,
+		SessionIDLen:        int(sessionIdLen[0]),
+		CipherSuites:        cipherSuites,
+		CompressionMethods:  compressionMethods,
+		Extensions:          []Extension{},
+	}
+
 	if len(raw) == nextOffset {
 		// No extensions block, which is valid before TLS 1.3.
-		ch := &ClientHello{
-			LegacyVersion:      binary.BigEndian.Uint16(legacyVersion),
-			SessionIDLen:       int(sessionIdLen[0]),
-			CipherSuites:       cipherSuites,
-			CompressionMethods: compressionMethods,
-			Extensions:         []Extension{},
-		}
 		return ch, nil
 	}
 	if len(raw) < nextOffset+2 {
@@ -291,7 +318,8 @@ func ParseClientHello(raw []byte) (*ClientHello, error) {
 		return nil, ErrTrailingData
 	}
 
-	extensions := []Extension{}
+	var malformed ErrorList
+	seen := make(map[uint16]bool)
 	for i := nextOffset + 2; i < extEnd; {
 		if i+extHeaderLen > extEnd {
 			return nil, ErrExtensionHeaderTruncated
@@ -301,49 +329,37 @@ func ParseClientHello(raw []byte) (*ClientHello, error) {
 		if i+extHeaderLen+extLength > extEnd {
 			return nil, ErrExtensionDataTruncated
 		}
+		if seen[extType] {
+			malformed = append(malformed, fmt.Errorf("%w: %#04x", ErrExtensionDuplicate, extType))
+		}
+		seen[extType] = true
+		if extType == extPreSharedKey && i+extHeaderLen+extLength != extEnd {
+			malformed = append(malformed, ErrPreSharedKeyIsNotLastExtension)
+		}
 		extData := raw[i+extHeaderLen : i+extHeaderLen+extLength]
-		extensions = append(extensions, Extension{Type: extType, Data: extData})
+		ch.Extensions = append(ch.Extensions, Extension{Type: extType, Data: extData})
 		i += extHeaderLen + extLength
 	}
 
-	ch := &ClientHello{
-		LegacyVersion:      binary.BigEndian.Uint16(legacyVersion),
-		SessionIDLen:       int(sessionIdLen[0]),
-		CipherSuites:       cipherSuites,
-		CompressionMethods: compressionMethods,
-		Extensions:         extensions,
-	}
-	ch.Malformed = ch.DecodeExtensions()
+	ch.Malformed = append(malformed, ch.DecodeExtensions()...)
 
 	return ch, nil
 }
 
-// ExtTypes is a TLS extension type, as registered with IANA. Only the
-// types DecodeExtensions decodes have constants.
-type ExtTypes uint16
-
-// Extension types decoded into ClientHello fields.
-const (
-	ServerName          ExtTypes = 0x0000 // server_name (RFC 6066 §3)
-	SupportedGroups     ExtTypes = 0x000a // supported_groups (RFC 9846)
-	SignatureAlgorithms ExtTypes = 0x000d // signature_algorithms (RFC 9846)
-	ALPN                ExtTypes = 0x0010 // application_layer_protocol_negotiation (RFC 7301 §3.1)
-	SupportedVersions   ExtTypes = 0x002b // supported_versions (RFC 9846)
-)
-
 // DecodeExtensions decodes the known extensions in ch.Extensions into
 // ServerName, SupportedGroups, SignatureAlgorithms, ALPN and
-// SupportedVersions. Unknown extension types are ignored.
+// SupportedVersions. Other extension types are ignored.
 //
 // Decoding is all-or-nothing per extension: a malformed extension leaves its
 // field untouched and adds one error to the returned list instead of failing.
 // It returns nil when every known extension decoded. If an extension type
-// appears more than once, the last well-formed one wins.
+// appears more than once, the last well-formed one wins; ParseClientHello
+// reports the duplicate itself.
 func (ch *ClientHello) DecodeExtensions() []error {
 	var errors []error
 	for _, ext := range ch.Extensions {
-		switch ExtTypes(ext.Type) {
-		case ServerName:
+		switch ext.Type {
+		case extServerName:
 			if len(ext.Data) < sniHeaderLen {
 				errors = append(errors, ErrServerNameTooShort)
 				continue
@@ -364,7 +380,7 @@ func (ch *ClientHello) DecodeExtensions() []error {
 				continue
 			}
 			ch.ServerName = string(ext.Data[sniHeaderLen : sniHeaderLen+int(nameLen)])
-		case SupportedGroups:
+		case extSupportedGroups:
 			if len(ext.Data) < 4 {
 				errors = append(errors, ErrSupportedGroupsTooShort)
 				continue
@@ -383,7 +399,7 @@ func (ch *ClientHello) DecodeExtensions() []error {
 				group := binary.BigEndian.Uint16(ext.Data[i : i+2])
 				ch.SupportedGroups = append(ch.SupportedGroups, group)
 			}
-		case SignatureAlgorithms:
+		case extSignatureAlgorithms:
 			if len(ext.Data) < 4 {
 				errors = append(errors, ErrSignatureAlgorithmsTooShort)
 				continue
@@ -402,7 +418,7 @@ func (ch *ClientHello) DecodeExtensions() []error {
 				algo := binary.BigEndian.Uint16(ext.Data[i : i+2])
 				ch.SignatureAlgorithms = append(ch.SignatureAlgorithms, algo)
 			}
-		case ALPN:
+		case extALPN:
 			if len(ext.Data) < 2 {
 				errors = append(errors, ErrALPNTooShort)
 				continue
@@ -437,7 +453,7 @@ func (ch *ClientHello) DecodeExtensions() []error {
 				continue
 			}
 			ch.ALPN = protos
-		case SupportedVersions:
+		case extSupportedVersions:
 			if len(ext.Data) < 2 {
 				errors = append(errors, ErrSupportedVersionsTooShort)
 				continue
