@@ -40,6 +40,6 @@ Go 1.27 (`go.mod`); with `GOTOOLCHAIN=auto` an older local Go downloads it.
 - **Don't commit** raw bulk captures, pcaps, keys or certificates. Commit a small sample and the command that produced it.
 - Commits follow Conventional Commits (`type(scope): description`, imperative, subject ≤ 50 chars).
 
-## AGENTS.md
+## Agent instructions
 
-`AGENTS.md` is an identical copy of this file for other agents. Edit `CLAUDE.md`, then `cp CLAUDE.md AGENTS.md`, and commit both together.
+`AGENTS.md` is the instruction file for every coding agent. `CLAUDE.md` contains only `@AGENTS.md`, so Claude Code imports this file. Edit `AGENTS.md`, never `CLAUDE.md`.
