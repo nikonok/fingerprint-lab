@@ -210,7 +210,6 @@ func ParseClientHello(raw []byte) (*ClientHello, error) {
 	if recordType != ClientHelloRecordType {
 		return nil, ErrNotHandshake
 	}
-	// legacy_record_version (bytes 1-2) is ignored; the length closes the header.
 	recordLength := int(binary.BigEndian.Uint16(raw[recordHeaderLen-2 : recordHeaderLen]))
 	if len(raw) < recordHeaderLen+recordLength {
 		return nil, ErrRecordTruncated
@@ -228,15 +227,11 @@ func ParseClientHello(raw []byte) (*ClientHello, error) {
 	if helloEnd < ClientHelloMinLen {
 		return nil, ErrHandshakeTooShort
 	}
-	// raw also holds the records that follow the ClientHello, so cut it to the
-	// end of the handshake message. The full slice expression caps the
-	// capacity too: a read past the end now panics instead of returning
-	// whatever bytes come next.
+	// Cut off the records after the ClientHello and cap the capacity.
 	raw = raw[:helloEnd:helloEnd]
 
 	// ClientHello body
 	legacyVersion := raw[helloBodyOffset : helloBodyOffset+legacyVersionLen]
-	// random sits between legacy_version and the session ID length.
 	sessionIdLen := raw[sessionIDLenOffset : sessionIDLenOffset+1]
 
 	if int(sessionIdLen[0]) > maxSessionIDLen {
@@ -258,8 +253,6 @@ func ParseClientHello(raw []byte) (*ClientHello, error) {
 	if cipherSuitesLength == 0 {
 		return nil, ErrNoCipherSuites
 	}
-	// Each suite is 2 bytes; an odd length would read half a suite plus the
-	// first byte of compression_methods.
 	if cipherSuitesLength%2 != 0 {
 		return nil, ErrCipherSuitesOddLength
 	}
@@ -306,14 +299,10 @@ func ParseClientHello(raw []byte) (*ClientHello, error) {
 	if len(raw) < extEnd {
 		return nil, ErrExtensionsTruncated
 	}
-	// The extensions block is the last field, so it must end exactly where
-	// the handshake length says the ClientHello ends.
 	if extEnd != len(raw) {
 		return nil, ErrTrailingData
 	}
 
-	// Each extension is checked against extEnd, not len(raw): its length is
-	// client-controlled and must not reach past the block it belongs to.
 	extensions := []Extension{}
 	for i := nextOffset + 2; i < extEnd; {
 		if i+extHeaderLen > extEnd {
@@ -428,8 +417,6 @@ func (ch *ClientHello) DecodeExtensions() []error {
 				errors = append(errors, ErrALPNEmptyList)
 				continue
 			}
-			// Collect into a local list and keep it only if every name is
-			// valid, the same all-or-nothing rule as the other extensions.
 			var protos []string
 			var bad error
 			for i := 2; i < len(ext.Data); {
