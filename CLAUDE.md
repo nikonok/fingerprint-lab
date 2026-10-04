@@ -35,6 +35,7 @@ Go 1.27 (`go.mod`); with `GOTOOLCHAIN=auto` an older local Go downloads it.
 - **Parsers take bytes and return values.** No I/O and no globals in `internal/fingerprint`. Truncated or hostile input returns an error and never panics.
 - **Wire order is data.** Keep lists in the order received, GREASE included. Sorting and filtering belong in the function that builds a specific fingerprint.
 - **Verify against an independent source.** JA4 output is checked against Wireshark (`tls.handshake.ja4`) or the FoxIO reference implementation on the same capture. HTTP/2 output is checked against Wireshark's HTTP/2 dissector. Test vectors come from real captures, stored under `internal/fingerprint/testdata/`.
+- **Log with `log/slog`.** Structured key/value pairs (`slog.Error("write record", "err", err)`). Each `main` sets the default logger and takes a `-log-level` flag (debug|info|warn|error, default info). No `log` or `fmt` printing for diagnostics. Parse failures on attacker-controlled input log at Debug, not Info, so clients can't flood the logs.
 - **Claims are measurements.** Any comparison in the README or a write-up names the client versions, the capture it came from, and what was not verified.
 - **Don't commit** raw bulk captures, pcaps, keys or certificates. Commit a small sample and the command that produced it.
 - Commits follow Conventional Commits (`type(scope): description`, imperative, subject ≤ 50 chars).

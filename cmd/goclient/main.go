@@ -6,7 +6,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 )
@@ -14,7 +14,10 @@ import (
 func main() {
 	url := flag.String("url", "https://localhost:8443/", "endpoint")
 	h1 := flag.Bool("h1", false, "force HTTP/1.1")
+	var level slog.Level
+	flag.TextVar(&level, "log-level", slog.LevelInfo, "log level: debug, info, warn or error")
 	flag.Parse()
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 
 	tr := &http.Transport{
 		// Skipping verification does not change the ClientHello.
@@ -29,10 +32,12 @@ func main() {
 
 	resp, err := (&http.Client{Transport: tr}).Get(*url)
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("request", "err", err)
+		os.Exit(1)
 	}
 	defer resp.Body.Close()
 	if _, err := io.Copy(os.Stdout, resp.Body); err != nil {
-		log.Fatal(err)
+		slog.Error("read body", "err", err)
+		os.Exit(1)
 	}
 }

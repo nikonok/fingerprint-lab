@@ -7,7 +7,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"flag"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -49,21 +49,27 @@ func main() {
 	out := flag.String("out", "captures/captures.jsonl", "JSONL file to append records to")
 	certFile := flag.String("cert", "", "certificate PEM (default: generated self-signed)")
 	keyFile := flag.String("key", "", "key PEM")
+	var level slog.Level
+	flag.TextVar(&level, "log-level", slog.LevelInfo, "log level: debug, info, warn or error")
 	flag.Parse()
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 
 	cert, err := loadCert(*certFile, *keyFile)
 	if err != nil {
-		log.Fatalf("certificate: %v", err)
+		slog.Error("certificate", "err", err)
+		os.Exit(1)
 	}
 	sink, err := openSink(*out)
 	if err != nil {
-		log.Fatalf("output: %v", err)
+		slog.Error("output", "err", err)
+		os.Exit(1)
 	}
 	defer sink.close()
 
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("listen", "err", err)
+		os.Exit(1)
 	}
 	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{cert},
@@ -82,8 +88,10 @@ func main() {
 		Protocols:         &protos,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	log.Printf("listening on https://%s, writing %s", ln.Addr(), *out)
-	log.Fatal(srv.Serve(capture.NewListener(ln, tlsCfg)))
+	slog.Info("listening", "addr", "https://"+ln.Addr().String(), "out", *out)
+	err = srv.Serve(capture.NewListener(ln, tlsCfg))
+	slog.Error("serve", "err", err)
+	os.Exit(1)
 }
 
 func handler(sink *sink) http.Handler {
@@ -96,9 +104,9 @@ func handler(sink *sink) http.Handler {
 		rec := buildRecord(r, cc)
 		if cc.FirstRequest() {
 			if err := sink.write(rec); err != nil {
-				log.Printf("write record: %v", err)
+				slog.Error("write record", "err", err)
 			}
-			log.Printf("%-12s %-8s ja4=%s errors=%d", rec.Label, rec.Proto, rec.JA4, len(rec.Errors))
+			slog.Info("record", "label", rec.Label, "proto", rec.Proto, "ja4", rec.JA4, "errors", len(rec.Errors))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		enc := json.NewEncoder(w)
