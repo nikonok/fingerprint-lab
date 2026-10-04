@@ -15,7 +15,7 @@ import (
 // The expected values come from a hand decode, cross-checked against
 // tshark 3.6.2 on the same bytes.
 func TestParseClientHelloOpenSSLMin(t *testing.T) {
-	raw, err := os.ReadFile("../../captures/openssl-min.bin")
+	raw, err := os.ReadFile("testdata/openssl-min.bin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestParseClientHelloOpenSSLMin(t *testing.T) {
 	}
 }
 
-const fixturePath = "../../captures/openssl-min.bin"
+const fixturePath = "testdata/openssl-min.bin"
 
 // loadFixture returns a fresh copy of the fixture with cap == len.
 func loadFixture(tb testing.TB) []byte {

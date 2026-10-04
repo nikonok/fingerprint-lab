@@ -1,6 +1,3 @@
-// Package fingerprint turns captured client bytes into fingerprints: the
-// parsed ClientHello, JA4, the HTTP/2 (Akamai-style) fingerprint and header
-// order.
 package fingerprint
 
 import (
@@ -11,12 +8,8 @@ import (
 )
 
 // Errors returned by ParseClientHello when the bytes are not a ClientHello it
-// can read, plus ErrNotImplemented for the parsers that are still stubs.
+// can read.
 var (
-	// ErrNotImplemented is returned by parsers that are still stubs. It is
-	// not returned by ParseClientHello.
-	ErrNotImplemented = errors.New("not implemented")
-
 	// Outer layer errors
 	ErrTooShort              = errors.New("too short to be a TLS record")
 	ErrNotHandshake          = errors.New("not a handshake record")
@@ -52,7 +45,7 @@ var (
 	ErrExtensionDuplicate             = errors.New("extension type appears more than once")
 	ErrPreSharedKeyIsNotLastExtension = errors.New("pre_shared_key extension is not the last extension in the ClientHello")
 
-	// Extension contents, collected by DecodeExtensions.
+	// Extension contents, collected by decodeExtensions.
 	ErrServerNameTooShort            = errors.New("server_name extension too short")
 	ErrServerNameListLenMismatch     = errors.New("server_name extension list length mismatch")
 	ErrServerNameNameTypeNotHostName = errors.New("server_name extension name type not host_name")
@@ -143,7 +136,7 @@ type ClientHello struct {
 	CompressionMethods  []byte      `json:"compression_methods"`
 	Extensions          []Extension `json:"extensions"`
 
-	// Decoded from their extensions by DecodeExtensions. A field stays empty
+	// Decoded from their extensions by decodeExtensions. A field stays empty
 	// when its extension is absent or malformed.
 	ServerName          string   `json:"server_name,omitempty"`          // 0x0000
 	SupportedGroups     []uint16 `json:"supported_groups,omitempty"`     // 0x000a
@@ -179,7 +172,7 @@ func (l ErrorList) MarshalJSON() ([]byte, error) {
 // ClientHello, such as later records, are ignored.
 //
 // It returns the fixed fields, the extensions as they appeared on the wire,
-// and the decoded fields filled in by DecodeExtensions. Every list keeps wire
+// and the decoded fields filled in by decodeExtensions. Every list keeps wire
 // order, GREASE values included. The returned ClientHello shares memory with
 // raw.
 //
@@ -245,13 +238,13 @@ func ParseClientHello(raw []byte) (*ClientHello, error) {
 
 	// ClientHello body
 	legacyVersion := raw[helloBodyOffset : helloBodyOffset+legacyVersionLen]
-	sessionIdLen := raw[sessionIDLenOffset : sessionIDLenOffset+1]
+	sessionIDLen := int(raw[sessionIDLenOffset])
 
-	if int(sessionIdLen[0]) > maxSessionIDLen {
+	if sessionIDLen > maxSessionIDLen {
 		return nil, ErrSessionIDTooLong
 	}
 
-	nextOffset := sessionIDLenOffset + 1 + int(sessionIdLen[0])
+	nextOffset := sessionIDLenOffset + 1 + sessionIDLen
 
 	if len(raw) < nextOffset+2 {
 		return nil, ErrCipherSuitesLengthMissing
@@ -281,21 +274,21 @@ func ParseClientHello(raw []byte) (*ClientHello, error) {
 		return nil, ErrCompressionMethodsLengthMissing
 	}
 
-	compressionMethodsLength := raw[nextOffset : nextOffset+1]
-	if len(raw) < nextOffset+1+int(compressionMethodsLength[0]) {
+	compressionMethodsLength := int(raw[nextOffset])
+	if len(raw) < nextOffset+1+compressionMethodsLength {
 		return nil, ErrCompressionMethodsTruncated
 	}
-	if compressionMethodsLength[0] == 0 {
+	if compressionMethodsLength == 0 {
 		return nil, ErrNoCompressionMethods
 	}
-	compressionMethods := raw[nextOffset+1 : nextOffset+1+int(compressionMethodsLength[0])]
+	compressionMethods := raw[nextOffset+1 : nextOffset+1+compressionMethodsLength]
 
-	nextOffset += 1 + int(compressionMethodsLength[0])
+	nextOffset += 1 + compressionMethodsLength
 
 	ch := &ClientHello{
 		LegacyVersion:       binary.BigEndian.Uint16(legacyVersion),
 		LegacyRecordVersion: legacyRecordVersion,
-		SessionIDLen:        int(sessionIdLen[0]),
+		SessionIDLen:        sessionIDLen,
 		CipherSuites:        cipherSuites,
 		CompressionMethods:  compressionMethods,
 		Extensions:          []Extension{},
@@ -309,8 +302,8 @@ func ParseClientHello(raw []byte) (*ClientHello, error) {
 		return nil, ErrExtensionsLengthMissing
 	}
 
-	extensionsLength := raw[nextOffset : nextOffset+2]
-	extEnd := nextOffset + 2 + int(binary.BigEndian.Uint16(extensionsLength))
+	extensionsLength := int(binary.BigEndian.Uint16(raw[nextOffset : nextOffset+2]))
+	extEnd := nextOffset + 2 + extensionsLength
 	if len(raw) < extEnd {
 		return nil, ErrExtensionsTruncated
 	}
@@ -341,12 +334,12 @@ func ParseClientHello(raw []byte) (*ClientHello, error) {
 		i += extHeaderLen + extLength
 	}
 
-	ch.Malformed = append(malformed, ch.DecodeExtensions()...)
+	ch.Malformed = append(malformed, ch.decodeExtensions()...)
 
 	return ch, nil
 }
 
-// DecodeExtensions decodes the known extensions in ch.Extensions into
+// decodeExtensions decodes the known extensions in ch.Extensions into
 // ServerName, SupportedGroups, SignatureAlgorithms, ALPN and
 // SupportedVersions. Other extension types are ignored.
 //
@@ -355,43 +348,43 @@ func ParseClientHello(raw []byte) (*ClientHello, error) {
 // It returns nil when every known extension decoded. If an extension type
 // appears more than once, the last well-formed one wins; ParseClientHello
 // reports the duplicate itself.
-func (ch *ClientHello) DecodeExtensions() []error {
-	var errors []error
+func (ch *ClientHello) decodeExtensions() []error {
+	var errs []error
 	for _, ext := range ch.Extensions {
 		switch ext.Type {
 		case extServerName:
 			if len(ext.Data) < sniHeaderLen {
-				errors = append(errors, ErrServerNameTooShort)
+				errs = append(errs, ErrServerNameTooShort)
 				continue
 			}
 			listLen := binary.BigEndian.Uint16(ext.Data[0:2])
 			if int(listLen) != len(ext.Data)-2 {
-				errors = append(errors, ErrServerNameListLenMismatch)
+				errs = append(errs, ErrServerNameListLenMismatch)
 				continue
 			}
 			nameType := ext.Data[2]
 			if nameType != hostNameType {
-				errors = append(errors, ErrServerNameNameTypeNotHostName)
+				errs = append(errs, ErrServerNameNameTypeNotHostName)
 				continue
 			}
 			nameLen := binary.BigEndian.Uint16(ext.Data[sniHeaderLen-2 : sniHeaderLen])
 			if int(nameLen) != len(ext.Data)-sniHeaderLen {
-				errors = append(errors, ErrServerNameNameLenMismatch)
+				errs = append(errs, ErrServerNameNameLenMismatch)
 				continue
 			}
 			ch.ServerName = string(ext.Data[sniHeaderLen : sniHeaderLen+int(nameLen)])
 		case extSupportedGroups:
 			if len(ext.Data) < 4 {
-				errors = append(errors, ErrSupportedGroupsTooShort)
+				errs = append(errs, ErrSupportedGroupsTooShort)
 				continue
 			}
 			listLen := binary.BigEndian.Uint16(ext.Data[0:2])
 			if int(listLen) != len(ext.Data)-2 {
-				errors = append(errors, ErrSupportedGroupsListLenMismatch)
+				errs = append(errs, ErrSupportedGroupsListLenMismatch)
 				continue
 			}
 			if listLen%2 != 0 {
-				errors = append(errors, ErrSupportedGroupsOddLength)
+				errs = append(errs, ErrSupportedGroupsOddLength)
 				continue
 			}
 			ch.SupportedGroups = []uint16{}
@@ -401,16 +394,16 @@ func (ch *ClientHello) DecodeExtensions() []error {
 			}
 		case extSignatureAlgorithms:
 			if len(ext.Data) < 4 {
-				errors = append(errors, ErrSignatureAlgorithmsTooShort)
+				errs = append(errs, ErrSignatureAlgorithmsTooShort)
 				continue
 			}
 			listLen := binary.BigEndian.Uint16(ext.Data[0:2])
 			if int(listLen) != len(ext.Data)-2 {
-				errors = append(errors, ErrSignatureAlgorithmsListLenMismatch)
+				errs = append(errs, ErrSignatureAlgorithmsListLenMismatch)
 				continue
 			}
 			if listLen%2 != 0 {
-				errors = append(errors, ErrSignatureAlgorithmsOddLength)
+				errs = append(errs, ErrSignatureAlgorithmsOddLength)
 				continue
 			}
 			ch.SignatureAlgorithms = []uint16{}
@@ -420,16 +413,16 @@ func (ch *ClientHello) DecodeExtensions() []error {
 			}
 		case extALPN:
 			if len(ext.Data) < 2 {
-				errors = append(errors, ErrALPNTooShort)
+				errs = append(errs, ErrALPNTooShort)
 				continue
 			}
 			listLen := binary.BigEndian.Uint16(ext.Data[0:2])
 			if int(listLen) != len(ext.Data)-2 {
-				errors = append(errors, ErrALPNListLenMismatch)
+				errs = append(errs, ErrALPNListLenMismatch)
 				continue
 			}
 			if listLen == 0 {
-				errors = append(errors, ErrALPNEmptyList)
+				errs = append(errs, ErrALPNEmptyList)
 				continue
 			}
 			var protos []string
@@ -449,22 +442,22 @@ func (ch *ClientHello) DecodeExtensions() []error {
 				i += int(strLen)
 			}
 			if bad != nil {
-				errors = append(errors, bad)
+				errs = append(errs, bad)
 				continue
 			}
 			ch.ALPN = protos
 		case extSupportedVersions:
 			if len(ext.Data) < 2 {
-				errors = append(errors, ErrSupportedVersionsTooShort)
+				errs = append(errs, ErrSupportedVersionsTooShort)
 				continue
 			}
 			listLen := ext.Data[0]
 			if int(listLen) != len(ext.Data)-1 {
-				errors = append(errors, ErrSupportedVersionsListLenMismatch)
+				errs = append(errs, ErrSupportedVersionsListLenMismatch)
 				continue
 			}
 			if listLen%2 != 0 {
-				errors = append(errors, ErrSupportedVersionsOddLength)
+				errs = append(errs, ErrSupportedVersionsOddLength)
 				continue
 			}
 			ch.SupportedVersions = []uint16{}
@@ -477,5 +470,5 @@ func (ch *ClientHello) DecodeExtensions() []error {
 		}
 	}
 
-	return errors
+	return errs
 }
