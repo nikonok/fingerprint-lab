@@ -15,4 +15,4 @@ go run ./cmd/fpserver          # https://127.0.0.1:8443, self-signed certificate
 
 Each connection is returned as JSON and appended to `captures/captures.jsonl`. A record holds the TLS parameters, the raw client bytes and decrypted prefix, and the fingerprints derived from them.
 
-Status: capture works end to end; the ClientHello, JA4 and HTTP/2 parsers are not implemented yet.
+Status: capture works end to end and the ClientHello parser is done (tested and fuzzed); the JA4 and HTTP/2 parsers are not implemented yet.
