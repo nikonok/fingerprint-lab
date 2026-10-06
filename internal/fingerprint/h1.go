@@ -11,18 +11,18 @@ type H1Head struct {
 	// Names holds the header field names in wire order with original case;
 	// duplicates are kept. Names are the only whitespace-normalised part:
 	// padding around the name is trimmed, so "Host : x" records as "Host".
-	Names []string
+	Names []string `json:"names"`
 
 	// Truncated reports that the input ended before the blank line that
 	// terminates the head: the capture limit cut the bytes, or the client
 	// never finished sending. The final line is used only when its name is
 	// colon-terminated, so a cut mid-name never emits a partial entry.
-	Truncated bool
+	Truncated bool `json:"truncated,omitempty"`
 
 	// Malformed reports that a line violated the field syntax of RFC 9112:
 	// no colon, an empty field name, or an obs-fold continuation before any
 	// field line. Malformed lines are skipped; parsing continues.
-	Malformed bool
+	Malformed bool `json:"malformed,omitempty"`
 }
 
 // H1HeaderOrder parses the head of an HTTP/1.x request from its raw bytes and
