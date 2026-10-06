@@ -33,11 +33,11 @@ type Record struct {
 	ALPN       string `json:"alpn"`
 	SNI        string `json:"sni"`
 
-	ClientHello   *fingerprint.ClientHello   `json:"client_hello,omitempty"`
-	JA4           string                     `json:"ja4,omitempty"`
-	JA4Raw        string                     `json:"ja4_r,omitempty"`
-	H2            *fingerprint.H2Fingerprint `json:"h2,omitempty"`
-	H1HeaderOrder []string                   `json:"h1_header_order,omitempty"`
+	ClientHello *fingerprint.ClientHello   `json:"client_hello,omitempty"`
+	JA4         string                     `json:"ja4,omitempty"`
+	JA4Raw      string                     `json:"ja4_r,omitempty"`
+	H2          *fingerprint.H2Fingerprint `json:"h2,omitempty"`
+	H1          *fingerprint.H1Head        `json:"h1,omitempty"`
 
 	RawClientBytes  []byte   `json:"raw_client_bytes"` // base64 in JSON
 	PlaintextPrefix []byte   `json:"plaintext_prefix"` // base64 in JSON
@@ -152,8 +152,11 @@ func buildRecord(r *http.Request, cc *capture.Conn) *Record {
 			fail("h2", err)
 		}
 	} else {
-		if rec.H1HeaderOrder, err = fingerprint.H1HeaderOrder(rec.PlaintextPrefix); err != nil {
+		h1, err := fingerprint.H1HeaderOrder(rec.PlaintextPrefix)
+		if err != nil {
 			fail("h1_header_order", err)
+		} else {
+			rec.H1 = &h1
 		}
 	}
 	return rec
