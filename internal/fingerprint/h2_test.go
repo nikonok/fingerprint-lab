@@ -246,6 +246,186 @@ func TestParseH2TruncatedFinalFrame(t *testing.T) {
 	assert.Empty(t, fp.Settings)
 }
 
+// TestParseH2PrefaceOnly: a valid preface with zero frames is a legitimate
+// prefix (the capture cap may sit exactly at the preface) — success, with
+// everything empty and the connection window increment zero.
+func TestParseH2PrefaceOnly(t *testing.T) {
+	fp, err := ParseH2(testH2Preface)
+	require.NoError(t, err)
+	assert.Empty(t, fp.Settings)
+	assert.Empty(t, fp.Priorities)
+	assert.Empty(t, fp.PseudoHeaderOrder)
+	assert.Empty(t, fp.HeaderOrder)
+	assert.Equal(t, uint32(0), fp.WindowUpdate)
+	assert.Equal(t, "|0|0|", fp.Akamai)
+}
+
+// TestParseH2EmptySettingsFrame: an empty SETTINGS frame (length 0, no ACK
+// flag) is what several real clients open with — it must parse successfully
+// and produce an empty, non-nil-equivalent settings list. The ACK-skip test
+// pins the flag distinction; this pins the empty-payload case.
+func TestParseH2EmptySettingsFrame(t *testing.T) {
+	raw := clientBurst(t, func(t *testing.T, fr *http2.Framer) {
+		require.NoError(t, fr.WriteSettings())
+		require.NoError(t, fr.WriteWindowUpdate(0, 15663105))
+	})
+
+	fp, err := ParseH2(raw)
+	require.NoError(t, err)
+	assert.Empty(t, fp.Settings)
+	assert.Equal(t, uint32(15663105), fp.WindowUpdate)
+}
+
+// TestParseH2ContinuationMerges: a header block split across HEADERS +
+// CONTINUATION must decode as one block — pseudo-header order comes out
+// complete, and the split point (mid-HPACK) must not corrupt names.
+func TestParseH2ContinuationMerges(t *testing.T) {
+	var block bytes.Buffer
+	enc := hpack.NewEncoder(&block)
+	for _, f := range []hpack.HeaderField{
+		{Name: ":method", Value: "GET"},
+		{Name: ":authority", Value: "fp.test"},
+		{Name: ":scheme", Value: "https"},
+		{Name: ":path", Value: "/"},
+		{Name: "accept", Value: "*/*"},
+		{Name: "user-agent", Value: "dummy/1.0"},
+	} {
+		require.NoError(t, enc.WriteField(f))
+	}
+	frag := block.Bytes()
+	cut := len(frag) / 2
+
+	raw := clientBurst(t, func(t *testing.T, fr *http2.Framer) {
+		require.NoError(t, fr.WriteHeaders(http2.HeadersFrameParam{
+			StreamID:      1,
+			BlockFragment: frag[:cut],
+			EndHeaders:    false,
+			EndStream:     true,
+		}))
+		require.NoError(t, fr.WriteContinuation(1, true, frag[cut:]))
+	})
+
+	fp, err := ParseH2(raw)
+	require.NoError(t, err)
+	assert.Equal(t, []string{":method", ":authority", ":scheme", ":path"}, fp.PseudoHeaderOrder)
+	assert.Equal(t, []string{"accept", "user-agent"}, fp.HeaderOrder)
+}
+
+// TestParseH2HeadersWithPriorityFlag: the PRIORITY flag on HEADERS puts five
+// extra bytes before the header block; the block must still decode to the
+// right order. Whether the priority values themselves belong in the
+// fingerprint is an open design question — this test only pins that their
+// presence never corrupts header order.
+func TestParseH2HeadersWithPriorityFlag(t *testing.T) {
+	var block bytes.Buffer
+	enc := hpack.NewEncoder(&block)
+	for _, f := range []hpack.HeaderField{
+		{Name: ":method", Value: "GET"},
+		{Name: ":path", Value: "/"},
+		{Name: "user-agent", Value: "dummy/1.0"},
+	} {
+		require.NoError(t, enc.WriteField(f))
+	}
+
+	raw := clientBurst(t, func(t *testing.T, fr *http2.Framer) {
+		require.NoError(t, fr.WriteHeaders(http2.HeadersFrameParam{
+			StreamID:      1,
+			BlockFragment: block.Bytes(),
+			EndHeaders:    true,
+			EndStream:     true,
+			Priority:      http2.PriorityParam{StreamDep: 0, Exclusive: true, Weight: 255},
+		}))
+	})
+
+	fp, err := ParseH2(raw)
+	require.NoError(t, err)
+	assert.Equal(t, []string{":method", ":path"}, fp.PseudoHeaderOrder)
+	assert.Equal(t, []string{"user-agent"}, fp.HeaderOrder)
+}
+
+// TestParseH2InterleavedControlFramesIgnored: DATA, PING and RST_STREAM are
+// normal connection traffic, not fingerprint material — they pass through
+// without error and without polluting any field.
+func TestParseH2InterleavedControlFramesIgnored(t *testing.T) {
+	raw := clientBurst(t, func(t *testing.T, fr *http2.Framer) {
+		require.NoError(t, fr.WriteSettings(
+			http2.Setting{ID: http2.SettingHeaderTableSize, Val: 4096},
+		))
+		require.NoError(t, fr.WritePing(false, [8]byte{1, 2, 3, 4, 5, 6, 7, 8}))
+		require.NoError(t, fr.WriteData(1, false, []byte("body")))
+		require.NoError(t, fr.WriteRSTStream(1, http2.ErrCodeCancel))
+		require.NoError(t, fr.WriteWindowUpdate(0, 777))
+	})
+
+	fp, err := ParseH2(raw)
+	require.NoError(t, err)
+	assert.Equal(t, []Setting{{ID: 1, Value: 4096}}, fp.Settings)
+	assert.Equal(t, uint32(777), fp.WindowUpdate)
+	assert.Empty(t, fp.Priorities)
+	assert.Empty(t, fp.PseudoHeaderOrder)
+	assert.Empty(t, fp.HeaderOrder)
+}
+
+// TestParseH2HeaderDuplicatesWireOrder: repeated and non-alphabetical header
+// names keep wire order exactly — order is the signal, no sorting or
+// deduping at parse time.
+func TestParseH2HeaderDuplicatesWireOrder(t *testing.T) {
+	var block bytes.Buffer
+	enc := hpack.NewEncoder(&block)
+	for _, f := range []hpack.HeaderField{
+		{Name: ":method", Value: "GET"},
+		{Name: ":path", Value: "/"},
+		{Name: "cookie", Value: "a=1"},
+		{Name: "accept-encoding", Value: "gzip"},
+		{Name: "cookie", Value: "b=2"},
+		{Name: "accept", Value: "*/*"},
+	} {
+		require.NoError(t, enc.WriteField(f))
+	}
+
+	raw := clientBurst(t, func(t *testing.T, fr *http2.Framer) {
+		require.NoError(t, fr.WriteHeaders(http2.HeadersFrameParam{
+			StreamID:      1,
+			BlockFragment: block.Bytes(),
+			EndHeaders:    true,
+			EndStream:     true,
+		}))
+	})
+
+	fp, err := ParseH2(raw)
+	require.NoError(t, err)
+	assert.Equal(t, []string{":method", ":path"}, fp.PseudoHeaderOrder)
+	assert.Equal(t, []string{"cookie", "accept-encoding", "cookie", "accept"}, fp.HeaderOrder)
+}
+
+// TestParseH2NoPanicOnHostileTail: bytes after a valid preface are
+// attacker-controlled. Any tail — truncated headers, absurd frame lengths,
+// zero-length frames — must never panic, and the err/fp invariant must
+// hold: an error means no fingerprint.
+func TestParseH2NoPanicOnHostileTail(t *testing.T) {
+	tails := map[string][]byte{
+		"empty tail":           {},
+		"lone zero byte":       {0},
+		"partial frame header": {0, 0, 4, 4},
+		"declared length max":  {0xff, 0xff, 0xff, 0x4},
+		"zero-length unknown":  {0, 0, 0, 0x1f, 0, 0, 0, 0, 0},
+		"length but no body":   {0, 0, 100, 0x4, 0, 0, 0, 0, 0},
+		"all 0xff":             bytes.Repeat([]byte{0xff}, 64),
+	}
+
+	for name, tail := range tails {
+		t.Run(name, func(t *testing.T) {
+			raw := append(append([]byte{}, testH2Preface...), tail...)
+			assert.NotPanics(t, func() {
+				fp, err := ParseH2(raw)
+				if err != nil {
+					assert.Nil(t, fp)
+				}
+			})
+		})
+	}
+}
+
 // TestParseH2CurlFixture is the real capture: 125 bytes from
 // captures/captures.jsonl (curl-h2, curl 7.81.0). Fill in wantSettings and
 // wantWindowUpdate from your §9 hand decode BEFORE running ParseH2 — the
