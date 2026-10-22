@@ -2,7 +2,7 @@ package fingerprint
 
 import (
 	"bytes"
-	"fmt"
+	"errors"
 	"strconv"
 
 	"golang.org/x/net/http2"
@@ -36,60 +36,40 @@ type H2Fingerprint struct {
 	Akamai string `json:"akamai"`
 }
 
-var (
-	ErrNotHTTP2 = fmt.Errorf("not HTTP/2: missing connection preface")
-)
+var ErrNotHTTP2 = errors.New("not HTTP/2: missing connection preface")
 
 // ParseH2 reads the client's side of an HTTP/2 connection from its first
-// decrypted bytes (capture.Conn.PlaintextPrefix).
+// decrypted bytes (capture.Conn.PlaintextPrefix) and returns what the client
+// revealed before and inside its first request.
 //
-// NOT IMPLEMENTED YET. Design notes:
+// The input starts with the 24-byte connection preface (RFC 9113 §3.4),
+// followed by frames. Parsing is delegated to golang.org/x/net/http2: a
+// single Framer drives the frame loop and a single HPACK decoder
+// (Framer.ReadMetaHeaders) decodes header blocks, so CONTINUATION frames
+// are merged and fields arrive in wire order.
 //
-// Input and output
-//   - In: bytes that start with the 24-byte connection preface
-//     "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", followed by frames. The buffer is
-//     capped, so the last frame may be truncated.
-//   - Out: SETTINGS in wire order, the stream-0 WINDOW_UPDATE, any PRIORITY
-//     frames, and the pseudo-header and header order of the first HEADERS
-//     block.
+// Recorded decisions:
+//   - The first stream-0 WINDOW_UPDATE is the fingerprint; later ones are
+//     runtime flow-control noise and must not overwrite it.
+//   - SETTINGS ACK frames (empty payload acknowledging the server's
+//     SETTINGS) carry no client data and are skipped.
+//   - Unknown frame types are skipped, not errors.
+//   - Only the first HEADERS block is recorded; later requests on the same
+//     connection are skipped (the HPACK decoder still sees them, keeping
+//     the dynamic table in sync).
+//   - The prefix buffer is capped (16 KiB), so the last frame is routinely
+//     truncated. Any read error after a valid preface ends the loop and
+//     keeps what was seen; it is not a parse failure. The only errors are
+//     a missing or wrong preface.
 //
-// Source of truth
-//   - RFC 9113: §3.4 preface, §4.1 frame header (length 3, type 1,
-//     flags 1, R+stream 4), §6.2 HEADERS (PADDED/PRIORITY flags change the
-//     payload layout), §6.5 SETTINGS, §6.9 WINDOW_UPDATE, §6.10
-//     CONTINUATION, §8.3 pseudo-headers
-//   - RFC 7541 (HPACK): header blocks are compressed and must be decoded
-//     to get names in order
-//   - Akamai, "Passive Fingerprinting of HTTP/2 Clients" (Black Hat EU
-//     2017): the fingerprint format
+// Known gap: a HEADERS frame with the PRIORITY flag set (Firefox signals
+// priority there instead of in PRIORITY frames) decodes correctly, but its
+// dependency/weight values are not recorded — see h2-worksheet.md §7.1.
 //
-// Library options
-//   - golang.org/x/net/http2: NewFramer(nil, reader), then ReadFrame, type
-//     switch on *SettingsFrame (ForeachSetting keeps order),
-//     *WindowUpdateFrame, *PriorityFrame, *HeadersFrame. Setting
-//     Framer.ReadMetaHeaders = hpack.NewDecoder(...) merges CONTINUATION
-//     and yields a *MetaHeadersFrame whose Fields keep wire order.
-//   - golang.org/x/net/http2/hpack alone: NewDecoder(size, emit). The emit
-//     callback fires once per field in order. Use it if frames are split
-//     by hand.
-//   - Manual frame parsing with encoding/binary: the frame header is 9
-//     bytes, so this is easy. HPACK is not; do not hand-roll it.
-//   - Wanting x/net means `go get golang.org/x/net`.
-//
-// Traps
-//   - One HPACK decoder per connection. The dynamic table carries over
-//     between header blocks, so a fresh decoder per block breaks on the
-//     second request.
-//   - The PRIORITY flag on HEADERS puts 5 extra bytes before the header
-//     block. Some clients signal priority there instead of in PRIORITY
-//     frames. Decide whether that belongs in the fingerprint and state the
-//     choice.
-//   - A server SETTINGS frame never appears here, because this is only
-//     what the client sent. The client's SETTINGS ACK does appear.
-//   - Frames with an unknown type must be skipped, not treated as errors.
-//     Some clients send them on purpose.
-//   - A truncated final frame is expected. Stop there without failing the
-//     parse.
+// Source of truth: RFC 9113 §4.1 (frame header), §6.2 (HEADERS), §6.5
+// (SETTINGS), §6.9 (WINDOW_UPDATE), §6.10 (CONTINUATION), §8.3
+// (pseudo-headers); RFC 7541 (HPACK); Akamai "Passive Fingerprinting of
+// HTTP/2 Clients" (the Akamai string format, built by buildAkamai).
 func ParseH2(plaintext []byte) (*H2Fingerprint, error) {
 	if len(plaintext) < 24 || string(plaintext[:24]) != "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" {
 		return nil, ErrNotHTTP2
@@ -196,7 +176,7 @@ func (fp *H2Fingerprint) buildAkamai() {
 		if len(p) < 2 {
 			continue // skip malformed pseudo-header names
 		}
-		buf.WriteByte(p[1]) // first character of the pseudo-header name
+		buf.WriteByte(p[1]) // letter code: the character after ':'
 		if i < len(fp.PseudoHeaderOrder)-1 {
 			buf.WriteByte(',')
 		}
