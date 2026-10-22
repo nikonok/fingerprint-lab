@@ -1,5 +1,14 @@
 package fingerprint
 
+import (
+	"bytes"
+	"fmt"
+	"strconv"
+
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/hpack"
+)
+
 // Setting is one HTTP/2 SETTINGS parameter, in the order the client sent it.
 type Setting struct {
 	ID    uint16 `json:"id"`
@@ -26,6 +35,10 @@ type H2Fingerprint struct {
 	// SETTINGS|WINDOW_UPDATE|PRIORITY|PSEUDO_HEADER_ORDER
 	Akamai string `json:"akamai"`
 }
+
+var (
+	ErrNotHTTP2 = fmt.Errorf("not HTTP/2: missing connection preface")
+)
 
 // ParseH2 reads the client's side of an HTTP/2 connection from its first
 // decrypted bytes (capture.Conn.PlaintextPrefix).
@@ -78,5 +91,116 @@ type H2Fingerprint struct {
 //   - A truncated final frame is expected. Stop there without failing the
 //     parse.
 func ParseH2(plaintext []byte) (*H2Fingerprint, error) {
-	return nil, ErrNotImplemented
+	if len(plaintext) < 24 || string(plaintext[:24]) != "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" {
+		return nil, ErrNotHTTP2
+	}
+
+	fr := http2.NewFramer(nil, bytes.NewReader(plaintext[24:]))
+	fr.SetMaxReadFrameSize(1<<24 - 1)
+	fr.ReadMetaHeaders = hpack.NewDecoder(4096, nil)
+
+	fp := &H2Fingerprint{}
+
+	for {
+		frame, err := fr.ReadFrame()
+		if err != nil {
+			break
+		}
+
+		switch f := frame.(type) {
+		case *http2.SettingsFrame:
+			if f.IsAck() { // acknowledgment of server SETTINGS, not part of the fingerprint
+				continue
+			}
+			f.ForeachSetting(func(s http2.Setting) error {
+				fp.Settings = append(fp.Settings, Setting{ID: uint16(s.ID), Value: s.Val})
+				return nil
+			})
+		case *http2.WindowUpdateFrame:
+			if f.StreamID == 0 && fp.WindowUpdate == 0 {
+				fp.WindowUpdate = f.Increment
+			}
+		case *http2.PriorityFrame:
+			fp.Priorities = append(fp.Priorities, Priority{
+				StreamID:  f.StreamID,
+				Exclusive: f.Exclusive,
+				DependsOn: f.StreamDep,
+				Weight:    f.Weight,
+			})
+		case *http2.MetaHeadersFrame:
+			if fp.PseudoHeaderOrder != nil {
+				continue // only the first HEADERS block counts
+			}
+			for _, hf := range f.Fields {
+				if len(hf.Name) > 0 && hf.Name[0] == ':' {
+					fp.PseudoHeaderOrder = append(fp.PseudoHeaderOrder, hf.Name)
+				} else {
+					fp.HeaderOrder = append(fp.HeaderOrder, hf.Name)
+				}
+			}
+		default:
+			// ignore unknown frame types
+		}
+	}
+
+	fp.buildAkamai()
+
+	return fp, nil
+}
+
+func (fp *H2Fingerprint) buildAkamai() {
+	var buf bytes.Buffer
+
+	// SETTINGS
+	for i := range fp.Settings {
+		s := fp.Settings[i]
+		buf.WriteString(strconv.FormatUint(uint64(s.ID), 10))
+		buf.WriteByte(':')
+		buf.WriteString(strconv.FormatUint(uint64(s.Value), 10))
+		if i < len(fp.Settings)-1 {
+			buf.WriteByte(';')
+		}
+	}
+	buf.WriteByte('|')
+
+	// WINDOW_UPDATE
+	buf.WriteString(strconv.FormatUint(uint64(fp.WindowUpdate), 10))
+	buf.WriteByte('|')
+
+	// PRIORITY
+	if len(fp.Priorities) == 0 {
+		buf.WriteByte('0')
+	}
+	for i := range fp.Priorities {
+		p := fp.Priorities[i]
+		buf.WriteString(strconv.FormatUint(uint64(p.StreamID), 10))
+		buf.WriteByte(':')
+		if p.Exclusive {
+			buf.WriteByte('1')
+		} else {
+			buf.WriteByte('0')
+		}
+		buf.WriteByte(':')
+		buf.WriteString(strconv.FormatUint(uint64(p.DependsOn), 10))
+		buf.WriteByte(':')
+		buf.WriteString(strconv.FormatUint(uint64(p.Weight), 10))
+		if i < len(fp.Priorities)-1 {
+			buf.WriteByte(',')
+		}
+	}
+	buf.WriteByte('|')
+
+	// PSEUDO_HEADER_ORDER
+	for i := range fp.PseudoHeaderOrder {
+		p := fp.PseudoHeaderOrder[i]
+		if len(p) < 2 {
+			continue // skip malformed pseudo-header names
+		}
+		buf.WriteByte(p[1]) // first character of the pseudo-header name
+		if i < len(fp.PseudoHeaderOrder)-1 {
+			buf.WriteByte(',')
+		}
+	}
+
+	fp.Akamai = buf.String()
 }
