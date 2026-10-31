@@ -15,4 +15,14 @@ go run ./cmd/fpserver          # https://127.0.0.1:8443, self-signed certificate
 
 Each connection is returned as JSON and appended to `captures/captures.jsonl`. A record holds the TLS parameters, the raw client bytes and decrypted prefix, and the fingerprints derived from them.
 
-Status: capture works end to end and the ClientHello parser is done (tested and fuzzed); the JA4 and HTTP/2 parsers are not implemented yet.
+## Status
+
+Working: TLS capture end to end; ClientHello parser (tested, fuzzed); JA4 / JA4_r; H1 header order. HTTP/2 parser in progress.
+
+## Known gaps
+
+- Multi-record ClientHellos are not re-parsed; the record version is captured but not yet measured as a signal.
+- The fingerprint is client-side only: the server's own SETTINGS and frames are absent from the input by construction (same as Akamai's method).
+- HTTP/2 over prior-knowledge h2c or Upgrade is out of scope; the endpoint is TLS + ALPN.
+- The decrypted-prefix cap is 16 KiB; a client sending more than that in its first header block shows an incomplete header order.
+- The Akamai H2 string is pinned to curl-impersonate's published fingerprints, not to a formal spec.
