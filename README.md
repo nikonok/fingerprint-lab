@@ -17,7 +17,7 @@ Each connection is returned as JSON and appended to `captures/captures.jsonl`. A
 
 ## Status
 
-Working: TLS capture end to end; ClientHello parser (tested, fuzzed); JA4 / JA4_r; H1 header order; HTTP/2 fingerprint parsing (SETTINGS order and values, first stream-level WINDOW_UPDATE, PRIORITY frames, and first-request header order).
+Working: TLS capture end to end; ClientHello parser (tested, fuzzed); JA4 / JA4_r; H1 header order; HTTP/2 fingerprint parsing (SETTINGS order and values, first connection-level WINDOW_UPDATE, PRIORITY frames, and first-request header order). Current curl and Go captures match independent wire-byte predictions; the curl real-capture test and `internal/fingerprint` package tests pass.
 
 ## Known gaps
 
@@ -27,3 +27,4 @@ Working: TLS capture end to end; ClientHello parser (tested, fuzzed); JA4 / JA4_
 - The decrypted-prefix cap is 16 KiB; a client sending more than that in its first header block shows an incomplete header order.
 - The Akamai H2 string is pinned to curl-impersonate's published fingerprints, not to a formal spec.
 - PRIORITY information carried in a HEADERS frame's priority field is not recorded yet.
+- Browser HTTP/2 captures have not yet been independently checked against Wireshark.
