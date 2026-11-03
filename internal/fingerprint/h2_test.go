@@ -431,8 +431,6 @@ func TestParseH2NoPanicOnHostileTail(t *testing.T) {
 // wantWindowUpdate from your §9 hand decode BEFORE running ParseH2 — the
 // same predict-then-check discipline as JA4 vs Wireshark.
 func TestParseH2CurlFixture(t *testing.T) {
-	t.Skip("fill expected values from the h2-worksheet §9 hand decode first")
-
 	raw, err := os.ReadFile("testdata/curl-h2-prefix.bin")
 	require.NoError(t, err)
 	require.Equal(t, 125, len(raw), "fixture drifted — re-extract from captures.jsonl")
@@ -441,9 +439,11 @@ func TestParseH2CurlFixture(t *testing.T) {
 	require.NoError(t, err)
 
 	wantSettings := []Setting{
-		// TODO: hand-decode bytes 33..68 of the fixture.
+		{ID: 3, Value: 100},
+		{ID: 4, Value: 33554432},
+		{ID: 2, Value: 0},
 	}
-	wantWindowUpdate := uint32(0) // TODO: decode the stream-0 increment.
+	wantWindowUpdate := uint32(33488897)
 
 	assert.Equal(t, wantSettings, fp.Settings)
 	assert.Equal(t, wantWindowUpdate, fp.WindowUpdate)
