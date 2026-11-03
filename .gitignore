@@ -4,3 +4,7 @@ certs/
 node_modules/
 /fpserver
 /goclient
+
+# Personal working worksheets stay local
+*-worksheet.md
+h2-manual-verification.md
