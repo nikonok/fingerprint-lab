@@ -27,4 +27,4 @@ Working: TLS capture end to end; ClientHello parser (tested, fuzzed); JA4 / JA4_
 - The decrypted-prefix cap is 16 KiB; a client sending more than that in its first header block shows an incomplete header order.
 - The Akamai H2 string is pinned to curl-impersonate's published fingerprints, not to a formal spec.
 - PRIORITY information carried in a HEADERS frame's priority field is not recorded yet.
-- Browser HTTP/2 captures have not yet been independently checked against Wireshark.
+- A sample from one HeadlessChrome 156 session is independently dissected by `tshark` with `./scripts/dissect-h2-prefix.sh captures/sample/chrome-headless-156-h2-prefix.bin`. The script wraps the already-decrypted H2 bytes in synthetic TCP headers; SETTINGS, WINDOW_UPDATE and header order match the endpoint parser. This checks H2 dissection, not TLS or real packet-level behavior.
